@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WebRTC Premium Call</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+<body>
+  <div class="app-container">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <h2><i class="fas fa-users"></i> Thành viên</h2>
+      <ul id="membersList"></ul>
+
+      <h2><i class="fas fa-list"></i> Logs</h2>
+      <div id="logs" class="logs"></div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+      <!-- Header: register / room / call -->
+      <header class="header">
+        <!-- Register -->
+        <div id="registerDiv" class="control-group">
+          <input id="nameInput" placeholder="Tên của bạn..." />
+          <button onclick="registerUser()" class="btn btn-primary"><i class="fas fa-plug"></i> Kết nối</button>
+        </div>
+
+        <!-- Room -->
+        <div id="roomDiv" class="control-group" style="display:none;">
+          <input id="roomIdInput" placeholder="ID Phòng..." />
+          <button onclick="createRoom()" class="btn btn-success"><i class="fas fa-plus"></i> Tạo Phòng</button>
+          <button onclick="joinRoom()" class="btn btn-secondary"><i class="fas fa-sign-in-alt"></i> Vào Phòng</button>
+          <button onclick="logout()" class="btn btn-warning"><i class="fas fa-sign-out-alt"></i> Logout</button>
+        </div>
+
+        <!-- Call -->
+        <div id="callDiv" class="control-group" style="display:none;">
+          <button onclick="startCall()" id="joinCallBtn" class="btn btn-success"><i class="fas fa-video"></i> Tham gia Call</button>
+          <button onclick="endCall()" id="endCallBtn" class="btn btn-danger" style="display:none;"><i class="fas fa-phone-slash"></i> Kết thúc Call</button>
+          <button onclick="leaveRoom()" id="leaveRoomBtn" class="btn btn-secondary"><i class="fas fa-door-open"></i> Rời Phòng</button>
+        </div>
+
+        <!-- WebSocket Status -->
+        <div id="status">
+          <i class="fas fa-signal"></i> Server: <span id="connStatus" class="status disconnected">disconnected</span>
+        </div>
+      </header>
+
+      <!-- Video Grid -->
+      <div id="videos" class="video-grid">
+        <!-- Local Video -->
+        <div class="video-wrapper">
+          <video id="localVideo" autoplay muted playsinline></video>
+          <div class="video-label">Bạn (Local) <span class="status connected">connected</span></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="client.js"></script>
+</body>
+</html>

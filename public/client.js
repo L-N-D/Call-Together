@@ -1,20 +1,17 @@
 let ws;
 let localStream;
 let peerConnections = {};
-let roomMembers = [];
-let userName;
-let myId;
-let roomId;
+let candidateQueue = {};
 let room = {
-  id: '',
-  status: 'standby',
-  members: []
-}
+  id: "",
+  status: "standby",
+  members: [],
+};
 let me = {
-  id: '',
-  name: '',
-  status: 'standby'
-}
+  id: "",
+  name: "",
+  status: "standby",
+};
 
 // Ice server config
 const iceConfig = {
@@ -41,17 +38,36 @@ window.onload = async () => {
   // keep websocket connection alive (send ping signal every 20 second)
   startHeartbeat();
   // Request permission to access Camera and Microphone
+  await initLocalMedia();
+};
+
+async function initLocalMedia() {
   try {
     localStream = await navigator.mediaDevices.getUserMedia({
       video: true,
       audio: true,
     });
-    document.getElementById("localVideo").srcObject = localStream;
   } catch (err) {
-    alert("Vui lòng cho phép truy cập Camera & Microphone!");
-    console.error(err);
+    console.warn("Full media failed, trying audio only...");
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch {
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+        });
+      } catch {
+        localStream = new MediaStream();
+      }
+    }
   }
-};
+
+  const localVideo = document.getElementById("localVideo");
+
+  if (localVideo && localStream.getVideoTracks().length > 0) {
+    localVideo.srcObject = localStream;
+  }
+}
 
 function initWs() {
   const protocol = window.location.protocol === "https:" ? "wss://" : "ws://";
@@ -74,7 +90,16 @@ function initWs() {
   ws.onclose = () => {
     document.getElementById("connStatus").textContent = "disconnected";
     // logEvent("WebSocket disconnected");
-    if (roomId) leaveRoom();
+    if (me.status === 'calling') {
+      if (ws.readyState === WebSocket.OPEN) {
+        leaveCall();
+      }
+    }
+    me.status = 'standby';
+    if (room.id) leaveRoom();
+    if (me.id) {
+      logout();
+    }
   };
 }
 
@@ -85,13 +110,14 @@ function startHeartbeat() {
   }, 20000);
 }
 
+// ====================================================================================================
+// Handle message
+// ====================================================================================================
 async function handleResponse(msg) {
-  if (msg.status && msg.status !== 200)
-    return alert(msg.message || "Server error");
+  if (msg.status && msg.status !== 200) return alert(msg || "Server error");
 
   switch (msg.action) {
     case "register":
-      // myId = msg.message;
       me = msg.message;
       document.getElementById("registerDiv").style.display = "none";
       document.getElementById("roomDiv").style.display = "block";
@@ -103,15 +129,19 @@ async function handleResponse(msg) {
       document.getElementById("callDiv").style.display = "block";
       updateCallButtons("idle");
       room = msg.message;
-      logEvent(`Joined Room ${roomId}`);
+      logEvent(`Joined Room ${room.id}`);
       break;
 
-    case "updateMembers":
-      updateMemberUI(msg.message);
+    // case "leaveRoom":
+    //   clearAllConnection(true);
+    //   break;
+
+    case "inviteCall":
+      handleInvite(msg.sender);
       break;
 
-    case "leaveRoom":
-      cleanupAfterLeave();
+    case "inviteResponse":
+      handleInviteResponse(msg.accepted, msg.target);
       break;
 
     case "offer":
@@ -126,37 +156,277 @@ async function handleResponse(msg) {
       await handleCandidate(msg.sender, msg.candidate);
       break;
 
-    case "memberLeft":
+    case "memberLeft": //leave call
       removePeer(msg.message);
       break;
 
-    case "inviteCall":
-      handleInviteCall(msg.sender);
+    case "updateMembers":
+      updateMemberUI(msg.message);
       break;
 
-    case "inviteResponse":
-      if (msg.accepted) {
-        logEvent(`[${msg.target}] chấp nhận kết nối`);
-        initPeerConnection(msg.target);
-        updatePeerStatus(msg.target, "connected");
-      } else {
-        logEvent(`[${msg.target}] từ chối kết nối`);
-        updatePeerStatus(msg.target, "rejected");
-      }
-      break;
-
-    default:
-      console.log("Unknown action:", msg.action);
   }
 }
 
-// ---------------- UI & Logging ----------------
+// ====================================================================================================
+// Features and Action functions
+// ====================================================================================================
+function registerUser() {
+  me.name = document.getElementById("nameInput").value.trim();
+  if (!me.name) return alert("Username is empty!");
+  ws.send(JSON.stringify({ action: "register", name: me.name }));
+}
+
+function createRoom() {
+  room.id = document.getElementById("roomIdInput").value.trim();
+  if (!room.id) return alert("Room ID is Empty!");
+  ws.send(JSON.stringify({ action: "createRoom", roomId: room.id }));
+}
+
+function joinRoom() {
+  room.id = document.getElementById("roomIdInput").value.trim();
+  if (!room.id) return alert("Room ID is Empty");
+  ws.send(JSON.stringify({ action: "joinRoom", roomId: room.id }));
+}
+
+function leaveRoom() {
+  clearAllConnection(true);
+  ws.send(
+    JSON.stringify({ action: "leaveRoom", roomId: room.id }),
+  );
+}
+
+function logout() {
+  if (ws && ws.readyState === WebSocket.OPEN && me.name) {
+    ws.send(JSON.stringify({ action: "logout", name: me.name }));
+  }
+  clearAllConnection(true);
+  document.getElementById("registerDiv").style.display = "block";
+  document.getElementById("roomDiv").style.display = "none";
+}
+
+// ====================================================================================================
+// Handle Call and Helper functions
+// ====================================================================================================
+function startGroupCall() {
+
+  // update UI btn
+  updateCallButtons('inCall');
+  me.status = 'calling';
+
+  // send Call invite to all members in this room
+  ws.send(JSON.stringify({action: 'inviteCall', roomId: room.id}))
+
+}
+
+function leaveCall() {
+  Object.values(peerConnections).forEach((pc) => pc.close());
+  peerConnections = {};
+  me.status = 'standby';
+  ws.send(
+    JSON.stringify({ action: "leaveCall", roomId: room.id }),
+  );
+  // Reset UI
+  updateCallButtons('idle');
+  document.getElementById("videos").innerHTML =
+    '<div class="video-wrapper"><video id="localVideo" autoplay muted playsinline></video><div class="video-label">Bạn (Local)</div></div>';
+  document.getElementById("localVideo").srcObject = localStream;
+}
+
+// when a member leaves call --> other members will remove the connection to this one
+function removePeer(client) {
+  const pc = peerConnections[client];
+
+  if (pc) {
+    pc.close();
+    delete peerConnections[client];
+  }
+  const wrap = document.getElementById(`wrap-${client}`);
+  if (wrap) wrap.remove();
+  logEvent(`[${client}] left the room`);
+}
+
+// Receive an invitation --> answer
+function handleInvite(sender) {
+  const name = room.members.find(m => m.id === sender)?.name || 'Unknown';
+
+  let accept = true;
+  if (me.status !== 'calling') {
+    accept = confirm(`${name} invite you to join Group Call`);
+  }
+
+  if (accept) {
+    me.status = 'calling';
+    updateCallButtons('inCall');
+  }
+
+  ws.send(
+    JSON.stringify({
+      action: "inviteResponse",
+      target: sender,
+      response: accept,
+      roomId: room.id,
+    }),
+  );
+}
+
+// Receive respone of the invitation --> handle answer
+async function handleInviteResponse(accepted, target) {
+
+  if (!accepted) {
+    // try {
+    //   peerConnections[target].close();
+    // } catch (err) { };
+    // delete peerConnections[target];
+    return;
+  }
+
+  const pc = configPeerConnection(target);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+
+  ws.send(JSON.stringify({
+    action: 'offer',
+    offer,
+    target: target,
+    sender: me.id
+  }))
+
+}
+
+async function handleOffer(sender, offer) {
+
+  const pc = configPeerConnection(sender);
+  await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+  if (candidateQueue[sender]) {
+    for (const c of candidateQueue[sender]) {
+      await pc.addIceCandidate(new RTCIceCandidate(c));
+    }
+    delete candidateQueue[sender];
+  }
+
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+
+  ws.send(JSON.stringify({
+    action: 'answer',
+    target: sender,
+    sender: me.id,
+    answer,
+  }));
+
+  if (me.status !== 'calling') {
+    me.status = 'calling';
+  }
+  updateCallButtons('inCall');
+
+}
+
+async function handleAnswer(target, answer) {
+  const pc = peerConnections[target];
+
+  if (pc) {
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    if (candidateQueue[target]) {
+      for (const c of candidateQueue[target]) {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+      }
+      delete candidateQueue[target];
+    }
+  }
+}
+
+async function handleCandidate(senderId, candidate) {
+  const pc = peerConnections[senderId];
+  if (!pc) return;
+
+  if (pc.remoteDescription) {
+    try {
+      await pc.addIceCandidate(new RTCIceCandidate(candidate));
+    } catch (err) {
+      console.error("Add ICE error:", err);
+    }
+  } else {
+    if (!candidateQueue[senderId]) {
+      candidateQueue[senderId] = [];
+    }
+    candidateQueue[senderId].push(candidate);
+  }
+}
+
+function configPeerConnection(target) {
+
+  if (peerConnections[target]) {
+    return peerConnections[target];
+  }
+
+  const pc = new RTCPeerConnection(iceConfig);
+
+  pc.ontrack = (event) => {
+    let video = document.getElementById(`remoteVideo-${target}`);
+
+    if (!video) {
+
+      const wrap = document.createElement("div");
+      wrap.className = "video-wrapper";
+      wrap.id = `wrap-${target}`;
+
+      video = document.createElement("video");
+      video.id = `remoteVideo-${target}`;
+      video.autoplay = true;
+      video.playsInline = true;
+
+      wrap.appendChild(video);
+
+      document.getElementById("videos").appendChild(wrap);
+    }
+
+    video.srcObject = event.streams[0];
+  }
+
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      ws.send(JSON.stringify({
+        action: 'candidate',
+        candidate: event.candidate,
+        target: target,
+        sender: me.id
+      }));
+    }
+  }
+
+  pc.onconnectionstatechange = () => {
+    const st = pc.connectionState;
+
+    if (st === 'failed' || st === 'disconnected' || st === 'closed') {
+      // không gửi endCall ở đây để tránh spam, server thường sẽ tự xử lý theo luồng endCall
+      // nhưng UI vẫn dọn
+      removePeer(target);
+    }
+  }
+
+  if (localStream && localStream.getTracks().length > 0) {
+    localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, localStream);
+    });
+  } else {
+    pc.addTransceiver("video", { direction: "recvonly" });
+    pc.addTransceiver("audio", { direction: "recvonly" });
+  }
+
+  peerConnections[target] = pc;
+  return pc;
+}
+
+// ====================================================================================================
+// UI and Ultility functions
+// ====================================================================================================
 function updateMemberUI(list) {
   // roomMembers = list; // [{id, name}]
   room.members = list;
   const ul = document.getElementById("membersList");
   ul.innerHTML = list
-    .map((u) => `<li data-id="${u.id}">${u.id === myId ? "You" : u.name}</li>`)
+    .map((u) => `<li data-id="${u.id}">${u.id === me.id ? "You" : u.name}</li>`)
     .join("");
 }
 
@@ -192,329 +462,17 @@ function updateCallButtons(state) {
   }
 }
 
-// ---------------- Actions ----------------
-function registerUser() {
-  userName = document.getElementById("nameInput").value.trim();
-  if (!userName) return alert("Username is empty!");
-  ws.send(JSON.stringify({ action: "register", name: userName }));
-}
-
-function createRoom() {
-  roomId = document.getElementById("roomIdInput").value.trim();
-  if (!roomId) return alert("Room ID is Empty!");
-  ws.send(JSON.stringify({ action: "createRoom", onwer: userName, roomId }));
-}
-
-function joinRoom() {
-  roomId = document.getElementById("roomIdInput").value.trim();
-  if (!roomId) return alert("Room ID is Empty");
-  ws.send(JSON.stringify({ action: "joinRoom", user: userName, roomId }));
-}
-
-function handleInviteCall(senderId){
-  const name = roomMembers.find(u => u.id === senderId)?.name || "Unknown";
-
-  if (me.status === 'calling') {
-    var accept = true;
-  } else {
-    var accept = confirm(`${name} invite you to join Group Call`);
-  }
-
-  ws.send(JSON.stringify({
-    action: "inviteResponse",
-    target: senderId,
-    respone: accept,
-    roomId
-  }));
-
-  if(accept){
-    initPeerConnection(senderId);
-    updatePeerStatus(senderId, "connected");
-  }
-}
-
-function updatePeerStatus(id, status){
-  const el = document.getElementById(`status-${id}`);
-  if(el) el.textContent = status;
-}
-
-function leaveRoom() {
-  cleanupAfterLeave();
-  ws.send(JSON.stringify({ action: "leaveRoom", user: me.name, roomId: room.id }));
-}
-
-function logout() {
-  if (ws && ws.readyState === WebSocket.OPEN && userName) {
-    ws.send(JSON.stringify({ action: "logout", name: me.name }));
-  }
-  cleanupAfterLeave();
-  document.getElementById("registerDiv").style.display = "block";
-  document.getElementById("roomDiv").style.display = "none";
-}
-
-// ---------------- Call ----------------
-function startCall() {
-  updateCallButtons("inCall");
-
-  // gửi joinRequest tới tất cả peer trong phòng
-  room.members.forEach((member) => {
-    if (member.id !== me.id) {
-      ws.send(
-        JSON.stringify({
-          action: "inviteCall",
-          sender: me.id,
-          target: member.id,
-          roomId,
-        }),
-      );
-      // Tạo video placeholder pending
-      addVideoPlaceholder(member.id, member.name, "pending");
-    }
-  });
-}
-
-function endCall() {
+function clearAllConnection(reset) {
   Object.values(peerConnections).forEach((pc) => pc.close());
   peerConnections = {};
-  ws.send(JSON.stringify({ action: "memberLeft", roomId, userId: myId }));
-  document.getElementById("videos").innerHTML =
-    '<div class="video-wrapper"><video id="localVideo" autoplay muted playsinline></video><div class="video-label">Bạn (Local)</div></div>';
-  document.getElementById("localVideo").srcObject = localStream;
-  updateCallButtons("endedCall");
-}
 
-function addVideoPlaceholder(id, name, status) {
-  if (document.getElementById(`vid-${id}`)) return;
-  const wrap = document.createElement("div");
-  wrap.className = "video-wrapper";
-  wrap.id = `wrap-${id}`;
-  wrap.innerHTML = `
-    <video id="vid-${id}" autoplay playsinline></video>
-    <div class="video-label">${name} <span class="status" id="status-${id}">${status}</span></div>
-  `;
-  document.getElementById("videos").appendChild(wrap);
-}
-
-// ---------------- P2P ----------------
-function initPeerConnection(targetId) {
-  const pc = new RTCPeerConnection(iceConfig);
-  peerConnections[targetId] = pc;
-
-  localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-  function ensureVideoElement() {
-    let video = document.getElementById(`vid-${targetId}`);
-    if (!video) {
-      const wrap = document.createElement("div");
-      wrap.className = "video-wrapper";
-      wrap.id = `wrap-${targetId}`;
-
-      const name =
-        roomMembers.find((u) => u.id === targetId)?.name || "Unknown";
-
-      wrap.innerHTML = `
-        <video id="vid-${targetId}" autoplay playsinline></video>
-        <div class="video-label">
-          ${name}
-          <span class="status" id="status-${targetId}">new</span>
-        </div>
-      `;
-
-      document.getElementById("videos").appendChild(wrap);
-      video = document.getElementById(`vid-${targetId}`);
-    }
-    return video;
-  }
-
-  function updateStatus(state) {
-    const statusEl = document.getElementById(`status-${targetId}`);
-    if (statusEl) statusEl.textContent = state;
-  }
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate && ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          action: "candidate",
-          target: targetId,
-          sender: myId,
-          candidate: e.candidate,
-          roomId,
-        }),
-      );
-    }
-  };
-
-  pc.ontrack = (e) => {
-    const video = ensureVideoElement();
-    video.srcObject = e.streams[0];
-  };
-
-  pc.oniceconnectionstatechange = () => {
-    logEvent(`[${targetId}] ICE state: ${pc.iceConnectionState}`);
-
-    if (pc.iceConnectionState === "failed") {
-      logEvent(`[${targetId}] P2P failed, trying TURN…`);
-      restartIce();
-    }
-  };
-
-  pc.onconnectionstatechange = () => {
-    const state = pc.connectionState;
-    updateStatus(state);
-    logEvent(`[${targetId}] Peer connection state: ${state}`);
-
-    if (state === "connected") {
-      clearTimeout(fallbackTimer);
-    }
-  };
-
-  const fallbackTimer = setTimeout(() => {
-    if (pc.connectionState !== "connected") {
-      logEvent(`[${targetId}] P2P timeout (15s), trying TURN…`);
-      restartIce();
-    }
-  }, 15000);
-
-  async function restartIce() {
-    try {
-      await pc.restartIce();
-
-      const offer = await pc.createOffer({ iceRestart: true });
-      await pc.setLocalDescription(offer);
-
-      ws.send(
-        JSON.stringify({
-          action: "offer",
-          target: targetId,
-          sender: myId,
-          offer,
-          roomId,
-        }),
-      );
-    } catch (err) {
-      console.error("ICE restart failed:", err);
-    }
-  }
-
-  const statsInterval = setInterval(async () => {
-    if (pc.connectionState === "closed") {
-      clearInterval(statsInterval);
-      return;
-    }
-
-    const stats = await pc.getStats();
-    stats.forEach((r) => {
-      if (r.type === "candidate-pair" && r.state === "succeeded") {
-        logEvent(
-          `[${targetId}] Selected candidate: ${r.localCandidateType} → ${r.remoteCandidateType}`,
-        );
-      }
-    });
-  }, 5000);
-
-  pc.createOffer()
-    .then((offer) => pc.setLocalDescription(offer))
-    .then(() => {
-      ws.send(
-        JSON.stringify({
-          action: "offer",
-          target: targetId,
-          sender: myId,
-          offer: pc.localDescription,
-          roomId,
-        }),
-      );
-    })
-    .catch(console.error);
-
-  return pc;
-}
-
-async function handleOffer(senderId, offer) {
-  const pc = new RTCPeerConnection(iceConfig);
-  peerConnections[senderId] = pc;
-
-  if (!localStream) {
-    localStream = await navigator.mediaDevices.getUserMedia({
-      video: true,
-      audio: true,
-    });
+  if (reset) {
+    document.getElementById("videos").innerHTML =
+      '<div class="video-wrapper"><video id="localVideo" autoplay muted playsinline></video><div class="video-label">Bạn (Local)</div></div>';
     document.getElementById("localVideo").srcObject = localStream;
+    updateMemberUI([]);
+    document.getElementById("callDiv").style.display = "none";
+    document.getElementById("roomDiv").style.display = "block";
+    updateCallButtons("idle");
   }
-  localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
-
-  pc.onicecandidate = (e) => {
-    if (e.candidate)
-      ws.send(
-        JSON.stringify({
-          action: "candidate",
-          target: senderId,
-          sender: myId,
-          candidate: e.candidate,
-          roomId,
-        }),
-      );
-  };
-  pc.ontrack = (e) => {
-    let video = document.getElementById(`vid-${senderId}`);
-    if (!video) {
-      const wrap = document.createElement("div");
-      wrap.className = "video-wrapper";
-      wrap.id = `wrap-${senderId}`;
-      const name =
-        roomMembers.find((u) => u.id === senderId)?.name || "Unknown";
-      wrap.innerHTML = `<video id="vid-${senderId}" autoplay playsinline></video><div class="video-label">${name}</div>`;
-      document.getElementById("videos").appendChild(wrap);
-      video = document.getElementById(`vid-${senderId}`);
-    }
-    video.srcObject = e.streams[0];
-  };
-
-  await pc.setRemoteDescription(new RTCSessionDescription(offer));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  ws.send(
-    JSON.stringify({
-      action: "answer",
-      target: senderId,
-      sender: myId,
-      answer,
-      roomId,
-    }),
-  );
-}
-
-async function handleAnswer(senderId, answer) {
-  await peerConnections[senderId]?.setRemoteDescription(
-    new RTCSessionDescription(answer),
-  );
-}
-
-async function handleCandidate(senderId, candidate) {
-  await peerConnections[senderId]?.addIceCandidate(
-    new RTCIceCandidate(candidate),
-  );
-}
-
-// ---------------- Cleanup ----------------
-function removePeer(id) {
-  if (peerConnections[id]) peerConnections[id].close();
-  delete peerConnections[id];
-  const wrap = document.getElementById(`wrap-${id}`);
-  if (wrap) wrap.remove();
-  logEvent(`[${id}] left the room`);
-}
-
-function cleanupAfterLeave() {
-  Object.values(peerConnections).forEach((pc) => pc.close());
-  peerConnections = {};
-  document.getElementById("videos").innerHTML =
-    '<div class="video-wrapper"><video id="localVideo" autoplay muted playsinline></video><div class="video-label">Bạn (Local)</div></div>';
-  document.getElementById("localVideo").srcObject = localStream;
-  updateMemberUI([]);
-  document.getElementById("callDiv").style.display = "none";
-  document.getElementById("roomDiv").style.display = "block";
-  updateCallButtons("idle");
-  roomId = null;
 }

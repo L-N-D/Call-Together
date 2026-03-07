@@ -65,7 +65,7 @@ wss.on("connection", (ws, req) => {
     }
 
     if (msg) {
-      // console.log(msg);
+      console.log(msg);
 
       switch (msg.action) {
         case "ping": {
@@ -126,9 +126,9 @@ wss.on("connection", (ws, req) => {
           room.members.push(clients.get(ws));
           writeDB(db);
           const asw = {
-            roomId: roomId,
+            id: roomId,
             status: room.status,
-            roomMembers: room.members
+            members: room.members
           }
           sendRespone(ws, msg.action, 200, asw);
           updateRoomMembers(roomId, wsClients);
@@ -172,7 +172,7 @@ wss.on("connection", (ws, req) => {
         // When a member press endCall button,
         // they are still in the room,
         // but other members should know someone left and cleanup the peer connection to them.
-        case "memberLeft": {
+        case "leaveCall": {
           const db = readDB();
           const room = db.rooms.find(r => r.id === msg.roomId);
           if (!room) {
@@ -180,6 +180,9 @@ wss.on("connection", (ws, req) => {
             break;
           }
           room.inCallMembers = room.inCallMembers.filter(u => u !== msg.userId);
+          if (room.inCallMembers.length === 0) {
+            room.status = 'standby';
+          }
           writeDB(db);
           broadcastClients(wsClients, msg.roomId, "memberLeft", msg.userId);
           break;
@@ -194,19 +197,26 @@ wss.on("connection", (ws, req) => {
           }
 
           // Add user into inCallMember array
-          room.inCallMembers.push(clients.get(ws));
+          const me = clients.get(ws);
+
+          if (!room.inCallMembers.includes(me)) {
+            room.inCallMembers.push(me);
+          }
           room.status = 'calling';
 
           writeDB(db);
 
+          // send Invite Call to all members who have not joined in the call
           room.members.forEach((memberId) => {
-            if (memberId !== clients.get(ws) && !(room.inCallMembers.includes(clients.get(ws)))) {
+            // ensure dont resend the invite to the owner of the call
+            if (memberId !== me && !(room.inCallMembers.includes(memberId))) {
               const targetWs = wsClients.get(memberId);
+              // console.log(memberId);
               if (targetWs && targetWs.readyState === WebSocket.OPEN) {
                 targetWs.send(
                   JSON.stringify({
                     action: "inviteCall",
-                    sender: clients.get(ws),
+                    sender: me,
                     roomId: msg.roomId,
                   }),
                 );
@@ -214,7 +224,7 @@ wss.on("connection", (ws, req) => {
             }
           });
 
-          sendRespone(ws, msg.action, 200, "Join request sent");
+          // sendRespone(ws, msg.action, 200, "Join request sent");
           break;
         }
 
@@ -240,14 +250,17 @@ wss.on("connection", (ws, req) => {
           const db = readDB();
           const room = db.rooms.find(r => r.id === msg.roomId);
           if (!room) { break; }
-          if (msg.respone) {
-            room.inCallMembers.push(clients.get(ws));
+          if (msg.response) {
+            const myId = clients.get(ws);
+            if (!room.inCallMembers.includes(myId)) {
+              room.inCallMembers.push(myId);
+            }
           }
           if (targetWs && targetWs.readyState === WebSocket.OPEN) {
             targetWs.send(
               JSON.stringify({
                 action: "inviteResponse",
-                accepted: msg.respone,
+                accepted: msg.response,
                 target: clients.get(ws),
                 roomId: msg.roomId,
               }),

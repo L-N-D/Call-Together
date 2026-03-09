@@ -1,12 +1,8 @@
-Dưới đây là phiên bản **README.md hoàn chỉnh, chuẩn và liền mạch**, format rõ ràng, dễ đọc và copy trực tiếp:
-
-```markdown
 # WebRTC Group Call Demo
 
 ## 1. Cấu trúc project
 
 ```
-
 /project
 ├─ public/           # Frontend (HTML/JS/CSS)
 │   ├─ index.html
@@ -16,8 +12,7 @@ Dưới đây là phiên bản **README.md hoàn chỉnh, chuẩn và liền m�
 ├─ utils.js          # Hàm readDB/writeDB, broadcast, update room
 ├─ certs/            # Chứa key.pem và cert.pem
 └─ README.md
-
-````
+```
 
 ---
 
@@ -29,7 +24,7 @@ Dùng OpenSSL:
 mkdir certs
 cd certs
 openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout key.pem -out cert.pem
-````
+```
 
 * Khi điền thông tin, có thể để mặc định.
 * File `key.pem` và `cert.pem` sẽ nằm trong `./certs`.
@@ -56,10 +51,10 @@ node server.js
 * Lấy **username** và **credential** bằng lệnh:
 
 ```bash
-curl -H "Authorization: Bearer <API-TOKEN>" \
+curl -H "Authorization: Bearer b9826dfd584389d305856c27231dfb2ce1ecf8953e9125caded18eccbb0a9df5" \
      -H "Content-Type: application/json" \
      -d '{"ttl": 86400}' \
-     https://rtc.live.cloudflare.com/v1/turn/keys/<ROOM-ID>/credentials/generate-ice-servers
+     https://rtc.live.cloudflare.com/v1/turn/keys/053fb90f2dff37a6f4c13dd2789ecd53/credentials/generate-ice-servers
 ```
 
 * Điền đúng username và credential vào client `iceConfig`:

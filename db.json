@@ -1,13 +1,33 @@
 {
   "users": [
     {
-      "id": "f6a78026-dce0-4491-a6fb-52350e8b9e44",
-      "name": "Duy"
+      "id": "27baf212-74b4-4507-a3d5-c95cb2625f40",
+      "name": "Ipad",
+      "status": "standby"
     },
     {
-      "id": "2c538f14-b63a-472f-9634-e245a6f843ca",
-      "name": "note7"
+      "id": "9a5e2545-7377-4da9-a6a4-1c6054f9e088",
+      "name": "pc",
+      "status": "standby"
+    },
+    {
+      "id": "f6549df6-007c-4204-9a3a-60de00c62a6b",
+      "name": "Phone",
+      "status": "standby"
     }
   ],
-  "rooms": []
+  "rooms": [
+    {
+      "id": "1",
+      "members": [
+        "9a5e2545-7377-4da9-a6a4-1c6054f9e088",
+        "f6549df6-007c-4204-9a3a-60de00c62a6b"
+      ],
+      "inCallMembers": [
+        "f6549df6-007c-4204-9a3a-60de00c62a6b",
+        "9a5e2545-7377-4da9-a6a4-1c6054f9e088"
+      ],
+      "status": "calling"
+    }
+  ]
 }

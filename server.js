@@ -1,290 +1,174 @@
-import fs, { read } from "fs";
+import fs from "fs";
 import https from "https";
-import express, { json } from "express";
-import { WebSocketServer } from "ws";
-import path from "path";
-const app = express();
-import {
-  readDB,
-  writeDB,
-  sendRespone,
-  updateRoomMembers,
-  broadcastClients,
-} from "./utils.js";
+import express from "express";
+import { WebSocketServer, WebSocket } from "ws";
+import crypto from "crypto";
+import { readDB, writeDB, sendRespone, updateRoomMembers, broadcastClients } from "./utils.js";
 
+const app = express();
 const PORT = 2706;
 
-let ssl;
+const resetDBOnStart = () => {
+  try {
+    const db = readDB();
+    db.users = [];
+    db.rooms.forEach(room => {
+      room.members = [];
+      room.inCallMembers = [];
+      room.status = 'standby';
+    });
+    writeDB(db);
+    console.log("[SYSTEM] Database has been cleared and reset.");
+  } catch (err) {
+    writeDB({ users: [], rooms: [] });
+  }
+};
+resetDBOnStart();
 
+let ssl;
 try {
   ssl = {
     key: fs.readFileSync("./certs/key.pem"),
     cert: fs.readFileSync("./certs/cert.pem"),
   };
 } catch (err) {
-  console.error("SSL ERROR");
+  console.error("SSL ERROR: Vui lòng kiểm tra lại chứng chỉ trong ./certs");
   process.exit(1);
 }
 
 const server = https.createServer(ssl, app);
-
 app.use(express.static("public"));
-
 const wss = new WebSocketServer({ server });
 
-// manage online users
 let clients = new Map();
 let wsClients = new Map();
 
-// ===================================================================================================
-// Handle connection
-// ===================================================================================================
+const cleanupEmptyRooms = (db) => {
+    const initialRoomCount = db.rooms.length;
+    db.rooms = db.rooms.filter(room => room.members && room.members.length > 0);
+    if (db.rooms.length < initialRoomCount) {
+      console.log(`[CLEANUP] Đã xóa các phòng trống. Số lượng phòng hiện tại: ${db.rooms.length}`);
+    }
+};
+
 wss.on("connection", (ws, req) => {
   ws.isAlive = true;
   const ip = req.headers["x-forwarded-for"] || req.socket.remoteAddress;
-  console.log(`[CONNECTION] [${ip}] New connection`);
-  // console.log(ws);
-  ws.send("Connected");
 
-  // close connection
   ws.on("close", () => {
-    console.log(`[CONNECTION] [${ip}] Disconnection`);
-    const id = clients.get(ws);
-    const users = readDB();
-    users.users = users.users.filter((user) => user.id != id);
-    writeDB(users);
-    clients.delete(ws);
+    const userId = clients.get(ws);
+    if (userId) {
+      const db = readDB();
+      db.rooms.forEach(room => {
+        if (room.members.includes(userId)) {
+          room.members = room.members.filter(id => id !== userId);
+          room.inCallMembers = room.inCallMembers.filter(id => id !== userId);
+          if (room.inCallMembers.length === 0) room.status = 'standby';
+          broadcastClients(wsClients, room.id, "memberLeft", userId);
+          updateRoomMembers(room.id, wsClients);
+        }
+      });
+      cleanupEmptyRooms(db);
+      db.users = db.users.filter(u => u.id !== userId);
+      writeDB(db);
+      clients.delete(ws);
+      wsClients.delete(userId);
+    }
   });
 
   ws.on("message", (message) => {
     let msg;
-    try {
-      msg = JSON.parse(message);
-    } catch (err) {
-      console.log("[ERROR] | Parse json message fail");
-    }
+    try { msg = JSON.parse(message); } catch (e) { return; }
 
-    if (msg) {
-      console.log(msg);
+    switch (msg.action) {
+      case "register":
+        const db = readDB();
+        const user = { id: crypto.randomUUID(), name: msg.name, status: 'standby' };
+        db.users.push(user);
+        writeDB(db);
+        clients.set(ws, user.id);
+        wsClients.set(user.id, ws);
+        sendRespone(ws, "register", 200, user);
+        break;
 
-      switch (msg.action) {
-        case "ping": {
-          ws.isAlive = true;
-          break;
+      case "joinRoom": {
+        const database = readDB();
+        let room = database.rooms.find(r => r.id === msg.roomId);
+        const uid = clients.get(ws);
+        if (!room) {
+          room = { id: msg.roomId, members: [], inCallMembers: [], status: 'standby' };
+          database.rooms.push(room);
+          console.log(`[ROOM] Created new room: ${msg.roomId}`);
         }
-
-        case "register": {
-          const db = readDB();
-          if (!db.users.includes(msg.name)) {
-            const user = {
-              id: crypto.randomUUID(),
-              status: 'standby',
-              name: msg.name,
-            };
-            db.users.push(user);
-            writeDB(db);
-            clients.set(ws, user.id);
-            wsClients.set(user.id, ws);
-            sendRespone(ws, msg.action, 200, user);
-          } else {
-            sendRespone(ws, msg.action, 500, "User already exist");
-          }
-          break;
-        }
-
-        case "createRoom": {
-          const db = readDB();
-
-          if (db.rooms.some((room) => room.id === msg.roomId)) {
-            sendRespone(ws, msg.action, 500, "Room existed");
-          }
-
-          const room = {
-            id: msg.roomId,
-            status: 'standby', //standby | calling
-            members: [],
-            inCallMembers: []
-          };
-
-          db.rooms.push(room);
-          writeDB(db);
-
-          sendRespone(ws, msg.action, 200, "Room created successfully");
-          break;
-        }
-
-        case "joinRoom": {
-          const db = readDB();
-          const roomId = msg.roomId;
-          // console.log(roomId);
-          const room = db.rooms.find((r) => r.id === roomId);
-          if (!room) {
-            sendRespone(ws, msg.action, 404, "Room not found");
-            break;
-          }
-
-          room.members.push(clients.get(ws));
-          writeDB(db);
-          const asw = {
-            id: roomId,
-            status: room.status,
-            members: room.members
-          }
-          sendRespone(ws, msg.action, 200, asw);
-          updateRoomMembers(roomId, wsClients);
-
-          break;
-        }
-
-        case "leaveRoom": {
-          const db = readDB();
-          const room = db.rooms.find((r) => r.id === msg.roomId);
-          if (!room) {
-            sendRespone(ws, msg.action, 500, "Room not found");
-            break;
-          }
-
-          room.members = room.members.filter(
-            (member) => member != clients.get(ws),
-          );
-          room.inCallMembers = room.inCallMembers.filter(m => m !== clients.get(ws));
-          if (room.members.length === 0) {
-            db.rooms = db.rooms.filter((r) => r.id != room.id);
-          }
-          writeDB(db);
-          sendRespone(ws, msg.action, 200, msg.roomId);
-          updateRoomMembers(msg.roomId, wsClients);
-          break;
-        }
-
-        case "offer":
-        case "answer":
-        case "candidate": {
-          const targetWs = wsClients.get(msg.target);
-          if (targetWs && targetWs.readyState === targetWs.OPEN) {
-            targetWs.send(JSON.stringify(msg));
-          } else {
-            sendRespone(ws, msg.action, 500, "Target not reachable");
-          }
-          break;
-        }
-
-        // When a member press endCall button,
-        // they are still in the room,
-        // but other members should know someone left and cleanup the peer connection to them.
-        case "leaveCall": {
-          const db = readDB();
-          const room = db.rooms.find(r => r.id === msg.roomId);
-          if (!room) {
-            sendRespone(ws, msg.action, 500, "Room not found");
-            break;
-          }
-          room.inCallMembers = room.inCallMembers.filter(u => u !== msg.userId);
-          if (room.inCallMembers.length === 0) {
-            room.status = 'standby';
-          }
-          writeDB(db);
-          broadcastClients(wsClients, msg.roomId, "memberLeft", msg.userId);
-          break;
-        }
-
-        case "inviteCall": { //roomId
-          const db = readDB();
-          const room = db.rooms.find((r) => r.id === msg.roomId);
-          if (!room) {
-            sendRespone(ws, msg.action, 404, "Room not found");
-            break;
-          }
-
-          // Add user into inCallMember array
-          const me = clients.get(ws);
-
-          if (!room.inCallMembers.includes(me)) {
-            room.inCallMembers.push(me);
-          }
-          room.status = 'calling';
-
-          writeDB(db);
-
-          // send Invite Call to all members who have not joined in the call
-          room.members.forEach((memberId) => {
-            // ensure dont resend the invite to the owner of the call
-            if (memberId !== me && !(room.inCallMembers.includes(memberId))) {
-              const targetWs = wsClients.get(memberId);
-              // console.log(memberId);
-              if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-                targetWs.send(
-                  JSON.stringify({
-                    action: "inviteCall",
-                    sender: me,
-                    roomId: msg.roomId,
-                  }),
-                );
-              }
-            }
-          });
-
-          // sendRespone(ws, msg.action, 200, "Join request sent");
-          break;
-        }
-
-        case 'inCall': { //roomId
-          const db = readDB();
-          const room = db.rooms.find(r => r.id === msg.roomId);
-          if (!room) { break; }
-          room.inCallMembers.push(clients.get(ws));
-          writeDB(db);
-          break;
-        }
-
-        case 'joinRequest': { //roomId
-          const db = readDB();
-          const room = db.rooms.find(r => r.id === msg.roomId);
-          if (!room) { break; }
-          sendRespone(ws, msg.action, 200, room.inCallMembers);
-          break;
-        }
-
-        case "inviteResponse": {
-          const targetWs = wsClients.get(msg.target);
-          const db = readDB();
-          const room = db.rooms.find(r => r.id === msg.roomId);
-          if (!room) { break; }
-          if (msg.response) {
-            const myId = clients.get(ws);
-            if (!room.inCallMembers.includes(myId)) {
-              room.inCallMembers.push(myId);
-            }
-          }
-          if (targetWs && targetWs.readyState === WebSocket.OPEN) {
-            targetWs.send(
-              JSON.stringify({
-                action: "inviteResponse",
-                accepted: msg.response,
-                target: clients.get(ws),
-                roomId: msg.roomId,
-              }),
-            );
-          } else {
-            sendRespone(ws, msg.action, 500, "Target not reachable");
-          }
-          break;
-        }
-
-        case "logout": {
-          const db = readDB();
-          db.users = db.users.filter((user) => user.name != msg.name);
-          clients.delete(ws);
-          writeDB(db);
-          break;
-        }
+        if (!room.members.includes(uid)) room.members.push(uid);
+        writeDB(database);
+        sendRespone(ws, "joinRoom", 200, room);
+        updateRoomMembers(msg.roomId, wsClients);
+        break;
       }
-    } else {
-      ws.send("Message is not in correct format of JSON");
+
+      case "inviteCall":
+        const dbCall = readDB();
+        const rCall = dbCall.rooms.find(r => r.id === msg.roomId);
+        if (!rCall) break;
+        const senderId = clients.get(ws);
+        rCall.status = "calling";
+        if (!rCall.inCallMembers.includes(senderId)) rCall.inCallMembers.push(senderId);
+        writeDB(dbCall);
+        rCall.members.forEach(mId => {
+          const target = wsClients.get(mId);
+          if (target && mId !== senderId) {
+            target.send(JSON.stringify({ action: "callStarted", roomId: rCall.id }));
+          }
+        });
+        sendRespone(ws, "startMesh", 200, rCall.members.filter(id => id !== senderId));
+        break;
+
+      case "joinCall":
+        const dbJoin = readDB();
+        const rJoin = dbJoin.rooms.find(r => r.id === msg.roomId);
+        const myId = clients.get(ws);
+        if (rJoin && !rJoin.inCallMembers.includes(myId)) rJoin.inCallMembers.push(myId);
+        writeDB(dbJoin);
+        sendRespone(ws, "startMesh", 200, rJoin.inCallMembers.filter(id => id !== myId));
+        break;
+
+      case "offer":
+      case "answer":
+      case "candidate":
+        const targetWs = wsClients.get(msg.target);
+        if (targetWs) targetWs.send(JSON.stringify(msg));
+        break;
+
+      case "leaveCall": {
+        const dbL = readDB();
+        const roomL = dbL.rooms.find(r => r.id === msg.roomId);
+        if (roomL) {
+          roomL.inCallMembers = roomL.inCallMembers.filter(id => id !== msg.userId);
+          if (roomL.inCallMembers.length === 0) roomL.status = 'standby';
+          writeDB(dbL);
+          broadcastClients(wsClients, msg.roomId, "memberLeft", msg.userId);
+          updateRoomMembers(msg.roomId, wsClients);
+        }
+        break;
+      }
+
+      case "leaveRoom": {
+        const db = readDB();
+        const userId = clients.get(ws);
+        const room = db.rooms.find(r => r.id === msg.roomId);
+        if (room) {
+          room.members = room.members.filter(id => id !== userId);
+          room.inCallMembers = room.inCallMembers.filter(id => id !== userId);
+          broadcastClients(wsClients, room.id, "memberLeft", userId);
+          cleanupEmptyRooms(db);
+          writeDB(db);
+          updateRoomMembers(room.id, wsClients);
+        }
+        break;
+      }
     }
   });
 });
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log("Server status: [Active]");
-});
+server.listen(PORT, "0.0.0.0", () => console.log(`Server Active: https://localhost:${PORT}`));

@@ -133,16 +133,19 @@ function startGroupCall() {
   me.status = "calling";
   updateCallButtons("inCall");
   ws.send(JSON.stringify({ action: "inviteCall", roomId: room.id }));
+  logEvent(`Cuộc gọi bắt đầu lúc ${new Date().toLocaleTimeString()}`);
 }
 
 function joinCall() {
   me.status = "calling";
   updateCallButtons("inCall");
   ws.send(JSON.stringify({ action: "joinCall", roomId: room.id }));
+  logEvent(`Tham gia cuộc gọi lúc ${new Date().toLocaleTimeString()}`);
 }
 
 function leaveCall() {
   ws.send(JSON.stringify({ action: "leaveCall", roomId: room.id, userId: me.id }));
+  logEvent(`Cuộc gọi kết thúc lúc ${new Date().toLocaleTimeString()}`);
   clearAllConnection(false);
   updateCallButtons("idle");
 }
